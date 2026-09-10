@@ -186,6 +186,10 @@ import com.armsone.imanagerai.ui.externalai.ExternalAISurfaceMode
 import com.armsone.imanagerai.ui.externalai.ExternalAITimerFormatter
 import com.armsone.imanagerai.ui.externalai.ExternalAITimingProfile
 import com.armsone.imanagerai.ui.externalai.attachOrderedPhotosToProvider
+import com.armsone.imanagerai.ui.externalai.ExternalAIDiagnosticsStore
+import com.armsone.imanagerai.ui.externalai.dispatchAIBISubmitOnce
+import com.armsone.imanagerai.ui.externalai.drainAIBIDiagnostics
+import com.armsone.imanagerai.ui.externalai.evaluateForAIBI
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -382,7 +386,7 @@ fun ComposerScreen(
                 .fillMaxSize()
                 .nestedScroll(dismissKeyboardOnUserScroll)
                 .verticalScroll(scrollState)
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 110.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
@@ -1219,6 +1223,10 @@ internal fun HiddenExternalAIWebView(
     onSuccess: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val diagnostics = remember { ExternalAIDiagnosticsStore(context) }
+    val diagnosticRun = remember(requestId) { diagnostics.start(provider.name) }
+    var runFinished by remember(requestId) { mutableStateOf(false) }
+    var hasDispatchedPrompt by remember(requestId) { mutableStateOf(false) }
     var webViewRef by remember(requestId) { mutableStateOf<WebView?>(null) }
     var isAutomationActive by remember(requestId) { mutableStateOf(true) }
     var nativeAttachmentBatch by remember(requestId) { mutableStateOf(ExternalAINativeAttachmentBatch.EMPTY) }
@@ -1227,14 +1235,17 @@ internal fun HiddenExternalAIWebView(
 
     LaunchedEffect(requestId, attachments) {
         nativeAttachmentPreparationFailed = false
+        diagnostics.record(diagnosticRun, "media_preparation_started", mapOf("expected_count" to attachments.size))
         runCatching {
             withContext(Dispatchers.IO) {
                 ExternalAINativeAttachmentBatch.prepare(context, attachments)
             }
         }.onSuccess {
             nativeAttachmentBatch = it
+            diagnostics.record(diagnosticRun, "media_prepared", mapOf("prepared_count" to it.uris.size))
         }.onFailure {
             nativeAttachmentPreparationFailed = true
+            diagnostics.record(diagnosticRun, "media_preparation_failed")
         }
     }
     val batchForDisposal = nativeAttachmentBatch
@@ -1313,6 +1324,9 @@ internal fun HiddenExternalAIWebView(
                     if (request?.isForMainFrame == true) {
                         val desc = error?.description?.toString() ?: "연결 실패"
                         val sanitized = ExternalAIErrorSanitizer.sanitize("Network error: $desc", provider)
+                        runFinished = true
+                        isAutomationActive = false
+                        diagnostics.record(diagnosticRun, "browser_load_failed")
                         onError(sanitized)
                     }
                 }
@@ -1322,7 +1336,13 @@ internal fun HiddenExternalAIWebView(
                     webView: WebView?,
                     filePathCallback: android.webkit.ValueCallback<Array<android.net.Uri>>,
                     fileChooserParams: FileChooserParams
-                ): Boolean = nativeAttachmentBatch.handleFileChooser(filePathCallback, fileChooserParams)
+                ): Boolean {
+                    if (!isAutomationActive || hasDispatchedPrompt) {
+                        filePathCallback.onReceiveValue(null)
+                        return true
+                    }
+                    return nativeAttachmentBatch.handleFileChooser(filePathCallback, fileChooserParams)
+                }
             }
         }
 
@@ -1347,6 +1367,8 @@ internal fun HiddenExternalAIWebView(
         wv.loadUrl(provider.url)
 
         onDispose {
+            if (!runFinished) diagnostics.record(diagnosticRun, "run_cancelled")
+            wv.evaluateJavascript(ExternalAIScripts.cancelTaskScript(), null)
             isAutomationActive = false
             wv.stopLoading()
             hostView?.removeView(wv)
@@ -1371,24 +1393,32 @@ internal fun HiddenExternalAIWebView(
         var attachmentAttempted = attachments.isEmpty()
         var promptInjected = false
         var promptSubmitted = false
+        var submissionStarted = 0L
 
         while (isAutomationActive && System.currentTimeMillis() - startTime < timings.visibleAutoFillTimeoutMs) {
             val url = wv.url
             if (ExternalAISecurityPolicy.canInjectScript(url, provider)) {
                 if (!baselineCaptured) {
                     val baselineRes = suspendCancellableCoroutine<String?> { cont ->
-                        wv.evaluateJavascript(ExternalAIScripts.recordBaselineScript(provider)) { cont.resume(it) }
+                        wv.evaluateJavascript(ExternalAIScripts.recordBaselineScript(provider)) { if (cont.isActive) cont.resume(it) }
                     }
                     baselineCount = ExternalAIScripts.parseBaselineCount(baselineRes)
+                    wv.evaluateForAIBI(ExternalAIScripts.beginTaskScript(attachments.size))
+                    wv.evaluateForAIBI(ExternalAIScripts.installDiagnosticsScript())
+                    diagnostics.record(diagnosticRun, "browser_loaded")
                     baselineCaptured = true
                 }
 
                 if (!attachmentHandled && !attachmentAttempted) {
                     attachmentAttempted = true
+                    diagnostics.record(diagnosticRun, "attachment_started", mapOf("expected_count" to attachments.size))
                     attachmentHandled = attachOrderedPhotosToProvider(wv, provider, attachments, timings)
                     dismissHiddenAIBIKeyboard(context, wv)
                     if (!attachmentHandled) {
                         isAutomationActive = false
+                        runFinished = true
+                        diagnostics.record(diagnosticRun, "attachment_failed")
+                        diagnostics.record(diagnosticRun, "manual_takeover")
                         onFallbackRequired(ExternalAIFallbackReason.ATTACHMENT_FAILED)
                         return@LaunchedEffect
                     }
@@ -1396,28 +1426,34 @@ internal fun HiddenExternalAIWebView(
 
                 if ((attachmentHandled || attachments.isEmpty()) && !promptInjected) {
                     val injectRes = suspendCancellableCoroutine<String?> { cont ->
-                        wv.evaluateJavascript(ExternalAIScripts.injectPromptScript(provider, prompt, force = false)) { cont.resume(it) }
+                        wv.evaluateJavascript(ExternalAIScripts.injectPromptScript(provider, prompt, force = false)) { if (cont.isActive) cont.resume(it) }
                     }
                     dismissHiddenAIBIKeyboard(context, wv)
                     val injection = ExternalAIScripts.parseInjectionResult(injectRes)
                     if (injection.success && injection.inputFound) {
                         promptInjected = true
+                        diagnostics.record(diagnosticRun, "prompt_inserted", mapOf("prompt_length" to prompt.length))
                     }
                 }
 
                 if (promptInjected && !promptSubmitted) {
+                    if (submissionStarted == 0L) submissionStarted = android.os.SystemClock.elapsedRealtime()
+                    if (android.os.SystemClock.elapsedRealtime() - submissionStarted >= 15_000L) break
                     delay(350L)
-                    val submitRes = suspendCancellableCoroutine<String?> { cont ->
-                        wv.evaluateJavascript(ExternalAIScripts.submitPromptScript(provider, 1)) { cont.resume(it) }
+                    if (!hasDispatchedPrompt) {
+                        hasDispatchedPrompt = wv.dispatchAIBISubmitOnce(provider, attachments.size) { hasDispatchedPrompt = true }
+                        if (hasDispatchedPrompt) diagnostics.record(diagnosticRun, "send_attempted", mapOf("attempt" to 1))
                     }
                     dismissHiddenAIBIKeyboard(context, wv)
                     delay(700L)
                     val verifyRes = suspendCancellableCoroutine<String?> { cont ->
-                        wv.evaluateJavascript(ExternalAIScripts.verifySubmissionScript(provider, baselineCount)) { cont.resume(it) }
+                        wv.evaluateJavascript(ExternalAIScripts.verifySubmissionScript(provider, baselineCount)) { if (cont.isActive) cont.resume(it) }
                     }
                     dismissHiddenAIBIKeyboard(context, wv)
+                    wv.drainAIBIDiagnostics(provider, diagnostics, diagnosticRun)
                     if (ExternalAIScripts.parseSubmissionVerified(verifyRes)) {
                         promptSubmitted = true
+                        diagnostics.record(diagnosticRun, "generation_started")
                         onSubmitted()
                         break
                     }
@@ -1427,32 +1463,54 @@ internal fun HiddenExternalAIWebView(
         }
 
         if (!promptSubmitted && isAutomationActive) {
-            onFallbackRequired(ExternalAIFallbackReason.MANUAL_CONFIRMATION)
+            isAutomationActive = false
+            runFinished = true
+            wv.evaluateJavascript(ExternalAIScripts.cancelTaskScript(), null)
+            diagnostics.record(diagnosticRun, "send_timeout")
+            diagnostics.record(diagnosticRun, "run_failed")
+            onError("답변 시작을 확인하지 못했어요. 다시 시도하거나 설정에서 진단 로그를 공유해 주세요.")
             return@LaunchedEffect
         }
 
         // 응답 관찰 루프
         var stabilityState = ExternalAIStabilityState()
+        val observationStarted = android.os.SystemClock.elapsedRealtime()
         while (isAutomationActive) {
             delay(timings.observationCadenceMs)
+            if (android.os.SystemClock.elapsedRealtime() - observationStarted >= 119_000L) {
+                runFinished = true
+                isAutomationActive = false
+                wv.evaluateJavascript(ExternalAIScripts.cancelTaskScript(), null)
+                diagnostics.record(diagnosticRun, "generation_failed")
+                onError("1분 59초 동안 답변이 없어서 중단했어요. 다시 시도해 주세요.")
+                return@LaunchedEffect
+            }
+            wv.drainAIBIDiagnostics(provider, diagnostics, diagnosticRun)
             val errorRes = suspendCancellableCoroutine<String?> { cont ->
-                wv.evaluateJavascript(ExternalAIScripts.extractErrorScript()) { cont.resume(it) }
+                wv.evaluateJavascript(ExternalAIScripts.extractErrorScript()) { if (cont.isActive) cont.resume(it) }
             }
             val domError = ExternalAIScripts.parseErrorResult(errorRes)
             if (domError.hasError && !domError.error.isNullOrBlank()) {
                 val sanitized = ExternalAIErrorSanitizer.sanitize(domError.error, provider)
+                runFinished = true
+                isAutomationActive = false
+                wv.evaluateJavascript(ExternalAIScripts.cancelTaskScript(), null)
+                diagnostics.record(diagnosticRun, "generation_failed")
                 onError(sanitized)
                 return@LaunchedEffect
             }
 
             val answerRes = suspendCancellableCoroutine<String?> { cont ->
-                wv.evaluateJavascript(ExternalAIScripts.extractAnswerScript(provider)) { cont.resume(it) }
+                wv.evaluateJavascript(ExternalAIScripts.extractAnswerScript(provider)) { if (cont.isActive) cont.resume(it) }
             }
             val poll = ExternalAIScripts.parsePollResult(answerRes)
             val nextStability = ExternalAIStabilityReducer.step(stabilityState, poll)
             stabilityState = nextStability
 
             if (nextStability.isStable && nextStability.stableAnswer != null) {
+                runFinished = true
+                diagnostics.record(diagnosticRun, "result_applied", mapOf("response_length" to nextStability.stableAnswer.length))
+                diagnostics.record(diagnosticRun, "run_completed")
                 onSuccess(nextStability.stableAnswer)
                 return@LaunchedEffect
             }

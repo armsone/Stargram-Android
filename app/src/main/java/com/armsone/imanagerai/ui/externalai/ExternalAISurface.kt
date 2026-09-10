@@ -97,6 +97,8 @@ import com.armsone.imanagerai.service.DirectAIProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -120,6 +122,15 @@ fun ExternalAISurface(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val diagnostics = remember { ExternalAIDiagnosticsStore(context) }
+    val diagnosticRun = remember(provider, prompt) { if (mode.isLogin) null else diagnostics.start(provider.name) }
+    var taskCancelled by remember { mutableStateOf(false) }
+    var hasDispatchedPrompt by remember { mutableStateOf(false) }
+    var taskInitialized by remember { mutableStateOf(false) }
+    var baselineForSubmission by remember { mutableStateOf(0) }
+    fun record(event: String, metrics: Map<String, Int> = emptyMap()) {
+        diagnosticRun?.let { diagnostics.record(it, event, metrics) }
+    }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var popupWebViewRef by remember { mutableStateOf<WebView?>(null) }
     var activeFallbackReason by remember(fallbackReason) { mutableStateOf(fallbackReason) }
@@ -158,14 +169,17 @@ fun ExternalAISurface(
 
     LaunchedEffect(attachments) {
         nativeAttachmentPreparationFailed = false
+        record("media_preparation_started", mapOf("expected_count" to attachments.size))
         runCatching {
             withContext(Dispatchers.IO) {
                 ExternalAINativeAttachmentBatch.prepare(context, attachments)
             }
         }.onSuccess {
             nativeAttachmentBatch = it
+            record("media_prepared", mapOf("prepared_count" to it.uris.size))
         }.onFailure {
             nativeAttachmentPreparationFailed = true
+            record("media_preparation_failed")
         }
     }
     val batchForDisposal = nativeAttachmentBatch
@@ -181,90 +195,66 @@ fun ExternalAISurface(
     }
 
     fun importAnswer(text: String) {
-        if (hasImportedAnswer) return
+        if (hasImportedAnswer || taskCancelled) return
         val cleaned = ExternalAIAnswerCleaner.clean(text, provider)
         if (cleaned.isBlank()) return
         hasImportedAnswer = true
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         clipboard?.setPrimaryClip(ClipData.newPlainText("Stargram Result", cleaned))
+        record("result_applied", mapOf("response_length" to cleaned.length))
+        record("run_completed")
         onImport(cleaned)
         onClose()
     }
 
-    // 자동 제출 시도
+    // One dispatch per task. Every subsequent pass only observes server generation evidence.
     suspend fun submitPromptWhenReady(wv: WebView, baselineCount: Int): Boolean {
         if (hasSubmittedPrompt) return true
-        submitFailed = false
-        val startTime = System.currentTimeMillis()
-        var attempt = 1
-
-        while (System.currentTimeMillis() - startTime < 15_000L && !hasSubmittedPrompt && !hasImportedAnswer) {
-            if (attempt == 1) {
-                val targetResult = suspendCancellableCoroutine<String?> { cont ->
-                    wv.evaluateJavascript(ExternalAIScripts.submitTargetScript(provider)) { cont.resume(it) }
+        val started = SystemClock.elapsedRealtime()
+        while (SystemClock.elapsedRealtime() - started < 15_000L && !taskCancelled) {
+            currentCoroutineContext().ensureActive()
+            if (!hasDispatchedPrompt) {
+                hasDispatchedPrompt = ExternalAIScripts.parseSubmissionDispatched(
+                    wv.evaluateForAIBI(ExternalAIScripts.submissionStateScript())
+                )
+                if (!hasDispatchedPrompt) {
+                    hasDispatchedPrompt = wv.dispatchAIBISubmitOnce(provider, attachments.size) { hasDispatchedPrompt = true }
+                    if (hasDispatchedPrompt) record("send_attempted", mapOf("attempt" to 1))
                 }
-                val target = ExternalAIScripts.parseSubmitPoint(targetResult)
-                if (target != null) {
-                    val x = target.first * wv.width
-                    val y = target.second * wv.height
-                    val downTime = SystemClock.uptimeMillis()
-                    MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0).also {
-                        it.source = InputDevice.SOURCE_TOUCHSCREEN
-                        wv.dispatchTouchEvent(it)
-                        it.recycle()
-                    }
-                    delay(80L)
-                    MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0).also {
-                        it.source = InputDevice.SOURCE_TOUCHSCREEN
-                        wv.dispatchTouchEvent(it)
-                        it.recycle()
-                    }
-                } else {
-                    wv.evaluateJavascript(ExternalAIScripts.submitPromptScript(provider, attempt), null)
-                }
-            } else if (attempt == 2) {
-                wv.evaluateJavascript(ExternalAIScripts.focusInputScript(provider), null)
-                wv.requestFocus()
-                delay(80L)
-                wv.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
-                wv.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
-            } else {
-                wv.evaluateJavascript(ExternalAIScripts.submitPromptScript(provider, attempt), null)
             }
-
             delay(700L)
-
-            val verifyScript = ExternalAIScripts.verifySubmissionScript(provider, baselineCount)
-            val verifyResult = suspendCancellableCoroutine<String?> { cont ->
-                wv.evaluateJavascript(verifyScript) { cont.resume(it) }
-            }
-
-            if (ExternalAIScripts.parseSubmissionVerified(verifyResult)) {
+            if (taskCancelled) return false
+            diagnosticRun?.let { wv.drainAIBIDiagnostics(provider, diagnostics, it) }
+            val verified = wv.evaluateForAIBI(ExternalAIScripts.verifySubmissionScript(provider, baselineCount))
+            if (ExternalAIScripts.parseSubmissionVerified(verified)) {
                 hasSubmittedPrompt = true
                 isGenerating = true
+                record("generation_started")
                 onSubmitted()
                 return true
             }
-
-            attempt++
-            delay(500L)
         }
-
-        if (!hasSubmittedPrompt) {
-            submitFailed = true
-        }
-        return hasSubmittedPrompt
+        submitFailed = true
+        taskCancelled = true
+        wv.evaluateJavascript(ExternalAIScripts.cancelTaskScript(), null)
+        record("send_timeout")
+        record("run_failed")
+        detectedErrorMessage = "전송 후 답변 시작을 확인하지 못했어요. 취소 후 다시 시도하거나 설정에서 진단 로그를 공유해 주세요."
+        onError(detectedErrorMessage)
+        return false
     }
 
     // 프롬프트 입력 시도
     suspend fun fillPrompt(wv: WebView, force: Boolean): Boolean {
+        if (taskCancelled || hasDispatchedPrompt) return false
         val script = ExternalAIScripts.injectPromptScript(provider, prompt, force = force)
         val result = suspendCancellableCoroutine<String?> { cont ->
-            wv.evaluateJavascript(script) { cont.resume(it) }
+            wv.evaluateJavascript(script) { if (cont.isActive) cont.resume(it) }
         }
         val injection = ExternalAIScripts.parseInjectionResult(result)
         return if (injection.success && injection.inputFound) {
             hasFilledPrompt = true
+            record("prompt_inserted", mapOf("prompt_length" to prompt.length))
             fillFailed = false
             wv.evaluateJavascript("if(document.activeElement){document.activeElement.blur();}", null)
             wv.clearFocus()
@@ -309,7 +299,7 @@ fun ExternalAISurface(
 
             val authScript = ExternalAIScripts.checkAuthStatusScript(provider)
             val authRes = suspendCancellableCoroutine<String?> { cont ->
-                wv.evaluateJavascript(authScript) { cont.resume(it) }
+                wv.evaluateJavascript(authScript) { if (cont.isActive) cont.resume(it) }
             }
 
             val check = ExternalAIScripts.parseAuthCheckResult(authRes)
@@ -332,7 +322,7 @@ fun ExternalAISurface(
 
     // 메인 프레임 내비게이션 완료 시 자동 채우기 및 전송 루프 실행
     LaunchedEffect(navigationGeneration, nativeAttachmentBatch.uris.size, nativeAttachmentPreparationFailed) {
-        if (mode.isLogin || (prompt.isBlank() && attachments.isEmpty()) || hasSubmittedPrompt || hasImportedAnswer) return@LaunchedEffect
+        if (mode.isLogin || taskCancelled || (prompt.isBlank() && attachments.isEmpty()) || hasSubmittedPrompt || hasImportedAnswer) return@LaunchedEffect
         if (nativeAttachmentPreparationFailed) {
             fillFailed = true
             return@LaunchedEffect
@@ -341,6 +331,16 @@ fun ExternalAISurface(
         nativeAttachmentBatch.resetDelivery()
         val wv = webViewRef ?: return@LaunchedEffect
         if (!ExternalAISecurityPolicy.canInjectScript(wv.url, provider)) return@LaunchedEffect
+        if (!taskInitialized) {
+            wv.evaluateForAIBI(ExternalAIScripts.beginTaskScript(attachments.size))
+            wv.evaluateForAIBI(ExternalAIScripts.installDiagnosticsScript())
+            taskInitialized = true
+            record("browser_loaded")
+        }
+        if (hasDispatchedPrompt) {
+            submitPromptWhenReady(wv, baselineForSubmission)
+            return@LaunchedEffect
+        }
         isAutoFilling = true
         fillFailed = false
         val startTime = System.currentTimeMillis()
@@ -349,8 +349,11 @@ fun ExternalAISurface(
         var attachmentHandled = attachments.isEmpty() || hasAttachedBatch
 
         if (!attachmentHandled) {
+            record("attachment_started", mapOf("expected_count" to attachments.size))
             attachmentHandled = attachOrderedPhotosToProvider(wv, provider, attachments)
             if (!attachmentHandled) {
+                record("attachment_failed")
+                record("manual_takeover")
                 activeFallbackReason = ExternalAIFallbackReason.ATTACHMENT_FAILED
                 detectedFallbackReason = ExternalAIFallbackReason.ATTACHMENT_FAILED
                 isAutoFilling = false
@@ -358,16 +361,18 @@ fun ExternalAISurface(
                 return@LaunchedEffect
             }
             hasAttachedBatch = true
+            record("attachment_ready", mapOf("attached_count" to attachments.size))
         }
 
-        while (isActive && System.currentTimeMillis() - startTime < 45_000L && !hasSubmittedPrompt && !hasImportedAnswer) {
+        while (isActive && !taskCancelled && System.currentTimeMillis() - startTime < 45_000L && !hasSubmittedPrompt && !hasImportedAnswer) {
             if (isPageReady) {
                 if (!baselineCaptured) {
                     val baselineScript = ExternalAIScripts.recordBaselineScript(provider)
                     val baselineRes = suspendCancellableCoroutine<String?> { cont ->
-                        wv.evaluateJavascript(baselineScript) { cont.resume(it) }
+                        wv.evaluateJavascript(baselineScript) { if (cont.isActive) cont.resume(it) }
                     }
                     baselineCount = ExternalAIScripts.parseBaselineCount(baselineRes)
+                    baselineForSubmission = baselineCount
                     baselineCaptured = true
                 }
 
@@ -378,7 +383,8 @@ fun ExternalAISurface(
                             isAutoFilling = false
                             return@LaunchedEffect
                         }
-                        hasFilledPrompt = false
+                        isAutoFilling = false
+                        return@LaunchedEffect
                     }
                 }
             }
@@ -401,13 +407,18 @@ fun ExternalAISurface(
         while (isActive && !hasImportedAnswer) {
             delay(700L)
 
+            if (taskCancelled) return@LaunchedEffect
+            diagnosticRun?.let { wv.drainAIBIDiagnostics(provider, diagnostics, it) }
             val errorScript = ExternalAIScripts.extractErrorScript()
             val errorRes = suspendCancellableCoroutine<String?> { cont ->
-                wv.evaluateJavascript(errorScript) { cont.resume(it) }
+                wv.evaluateJavascript(errorScript) { if (cont.isActive) cont.resume(it) }
             }
             val domError = ExternalAIScripts.parseErrorResult(errorRes)
             if (domError.hasError && !domError.error.isNullOrBlank()) {
                 val sanitized = ExternalAIErrorSanitizer.sanitize(domError.error, provider)
+                record("generation_failed")
+                taskCancelled = true
+                wv.evaluateJavascript(ExternalAIScripts.cancelTaskScript(), null)
                 detectedErrorMessage = sanitized
                 isGenerating = false
                 onError(sanitized)
@@ -416,7 +427,7 @@ fun ExternalAISurface(
 
             val script = ExternalAIScripts.extractAnswerScript(provider)
             val answerRes = suspendCancellableCoroutine<String?> { cont ->
-                wv.evaluateJavascript(script) { cont.resume(it) }
+                wv.evaluateJavascript(script) { if (cont.isActive) cont.resume(it) }
             }
             val poll = ExternalAIScripts.parsePollResult(answerRes)
             isGenerating = poll.generating
@@ -448,6 +459,9 @@ fun ExternalAISurface(
                 elapsedSeconds += 1L
                 if (elapsedSeconds >= ExternalAITimerFormatter.GENERATION_TIMEOUT_SECONDS) {
                     val message = "1분 59초 동안 답변이 없어서 중단했어요. 다시 시도해 주세요."
+                    record("generation_failed")
+                    taskCancelled = true
+                    webViewRef?.evaluateJavascript(ExternalAIScripts.cancelTaskScript(), null)
                     detectedErrorMessage = message
                     onError(message)
                     onClose()
@@ -543,19 +557,15 @@ fun ExternalAISurface(
                             )
                         }
                         ActionButton(
-                            title = "다시 넣기",
-                            icon = Icons.Filled.Refresh,
-                            testTag = "externalai.reinject",
+                            title = "취소",
+                            icon = Icons.Filled.Close,
+                            testTag = "externalai.cancel",
                             appearance = appearance,
                             onClick = {
-                                webViewRef?.let { wv ->
-                                    scope.launch {
-                                        hasSubmittedPrompt = false
-                                        if (fillPrompt(wv, force = true)) {
-                                            submitPromptWhenReady(wv, 0)
-                                        }
-                                    }
-                                }
+                                taskCancelled = true
+                                webViewRef?.evaluateJavascript(ExternalAIScripts.cancelTaskScript(), null)
+                                record("run_cancelled")
+                                onClose()
                             }
                         )
                         ActionButton(
@@ -785,7 +795,13 @@ fun ExternalAISurface(
                                     webView: WebView?,
                                     filePathCallback: android.webkit.ValueCallback<Array<android.net.Uri>>,
                                     fileChooserParams: FileChooserParams
-                                ): Boolean = nativeAttachmentBatch.handleFileChooser(filePathCallback, fileChooserParams)
+                                ): Boolean {
+                                    if (taskCancelled || hasDispatchedPrompt) {
+                                        filePathCallback.onReceiveValue(null)
+                                        return true
+                                    }
+                                    return nativeAttachmentBatch.handleFileChooser(filePathCallback, fileChooserParams)
+                                }
 
                                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                     pageProgress = newProgress / 100f
@@ -852,6 +868,9 @@ fun ExternalAISurface(
 
     DisposableEffect(Unit) {
         onDispose {
+            if (!hasImportedAnswer && !taskCancelled) record("run_cancelled")
+            taskCancelled = true
+            webViewRef?.evaluateJavascript(ExternalAIScripts.cancelTaskScript(), null)
             popupWebViewRef?.let { popup ->
                 popup.stopLoading()
                 popup.destroy()
@@ -873,6 +892,7 @@ internal suspend fun attachOrderedPhotosToProvider(
     attachments: List<ExternalAIAttachment>,
     timings: ExternalAITimingProfile = ExternalAITimingProfile.DEFAULT
 ): Boolean {
+    currentCoroutineContext().ensureActive()
     if (attachments.isEmpty()) return true
     if (attachments.size !in 1..8) return false
     val ordered = attachments.sortedBy { it.sourceIndex }
@@ -993,8 +1013,29 @@ internal suspend fun attachOrderedPhotosToProvider(
     return false
 }
 
-private suspend fun WebView.evaluateForAIBI(script: String): String? =
+internal suspend fun WebView.dispatchAIBISubmitOnce(provider: DirectAIProvider, expectedCount: Int, onClaimed: () -> Unit = {}): Boolean {
+    currentCoroutineContext().ensureActive()
+    val point = ExternalAIScripts.parseSubmitPoint(evaluateForAIBI(ExternalAIScripts.claimNativeSubmissionScript(provider, expectedCount)))
+        ?: return false
+    currentCoroutineContext().ensureActive()
+    onClaimed()
+    dispatchTrustedTap(point)
+    return true
+}
+
+internal suspend fun WebView.drainAIBIDiagnostics(
+    provider: DirectAIProvider,
+    store: ExternalAIDiagnosticsStore,
+    runID: java.util.UUID
+) {
+    if (!ExternalAISecurityPolicy.canInjectScript(url, provider)) return
+    ExternalAIScripts.parseDiagnosticEvents(evaluateForAIBI(ExternalAIScripts.drainDiagnosticsScript(provider)))
+        .forEach { (stage, metrics) -> store.record(runID, stage, metrics) }
+}
+
+internal suspend fun WebView.evaluateForAIBI(script: String): String? =
     suspendCancellableCoroutine { continuation ->
+        if (!continuation.isActive) return@suspendCancellableCoroutine
         evaluateJavascript(script) { result ->
             if (continuation.isActive) continuation.resume(result)
         }
@@ -1049,6 +1090,7 @@ private suspend fun WebView.openAttachmentChooserWithTrustedTouch(
 }
 
 private suspend fun WebView.dispatchTrustedTap(point: Pair<Float, Float>) {
+    currentCoroutineContext().ensureActive()
     val x = point.first * width
     val y = point.second * height
     val downTime = SystemClock.uptimeMillis()
@@ -1058,7 +1100,15 @@ private suspend fun WebView.dispatchTrustedTap(point: Pair<Float, Float>) {
         it.recycle()
         consumed
     }
-    delay(80L)
+    try {
+        delay(80L)
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_CANCEL, x, y, 0).also {
+            dispatchTouchEvent(it)
+            it.recycle()
+        }
+        throw cancelled
+    }
     val upConsumed = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0).let {
         it.source = InputDevice.SOURCE_TOUCHSCREEN
         val consumed = dispatchTouchEvent(it)

@@ -277,6 +277,39 @@ fun ProfileSettingsScreen(store: CreatorProfileStore) {
                     }
 
                     HorizontalDivider(color = BrandTheme.divider(appearance))
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                val export = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    runCatching {
+                                        val latest = com.armsone.imanagerai.ui.externalai.ExternalAIDiagnosticsStore(context).latestFile()
+                                            ?: return@runCatching null
+                                        val folder = java.io.File(context.cacheDir, "share")
+                                        check(folder.isDirectory || folder.mkdirs())
+                                        latest.copyTo(java.io.File(folder, "aibi-diagnostics.json"), overwrite = true)
+                                    }.getOrNull()
+                                }
+                                if (export == null) {
+                                    android.widget.Toast.makeText(context, "공유할 진단 로그가 없어요. AI를 한 번 실행해 주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                                } else {
+                                    runCatching {
+                                        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", export)
+                                        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                            type = "application/json"
+                                            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                            clipData = android.content.ClipData.newRawUri("AIBI diagnostics", uri)
+                                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(android.content.Intent.createChooser(intent, "진단 로그 공유"))
+                                    }.onFailure {
+                                        android.widget.Toast.makeText(context, "진단 로그 공유를 열지 못했어요. 다시 시도해 주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.testTag("settings.aibi.shareDiagnostics")
+                    ) { Text("최근 AI 진단 로그 공유") }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,

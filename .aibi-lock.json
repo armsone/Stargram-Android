@@ -47,7 +47,7 @@
       }
     },
     "imanager-android": {
-      "version": "0.5.1",
+      "version": "0.5.2",
       "files": {
         "app/src/main/java/com/armsone/imanagerai/ui/externalai/ExternalAINativeFileBridge.kt": {
           "sha256": "727b03c6a6a6e3f4a932db739d8120f44c75dc872d03c38991a384ad8eb27c87",
@@ -62,7 +62,7 @@
           "source": "profiles/imanager/distribution/android/ExternalAIModels.kt"
         },
         "app/src/main/java/com/armsone/imanagerai/ui/externalai/ExternalAIScripts.kt": {
-          "sha256": "02df1380382c88a810aa6bc7ff4eeae88883873661d1ebd17348dec0d8234084",
+          "sha256": "464bf9d1a5611ed40a0d8792c353bca8f7722a92e20e21532b65d9ff1fc0409d",
           "source": "profiles/imanager/distribution/android/ExternalAIScripts.kt"
         },
         "app/src/main/java/com/armsone/imanagerai/ui/externalai/ExternalAISecurityPolicy.kt": {
@@ -97,5 +97,5 @@
     }
   },
   "consumer": "imanager",
-  "aibiVersion": "0.5.1"
+  "aibiVersion": "0.5.2"
 }

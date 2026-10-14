@@ -81,6 +81,9 @@ class CreatorProfileStore(private val storage: KeyValueStore) {
     private val _presets: MutableStateFlow<List<WritingPreset>>
     val presets: StateFlow<List<WritingPreset>> get() = _presets.asStateFlow()
 
+    val availabilityStore: AIProviderAvailabilityStore = AIProviderAvailabilityStore(storage)
+    val runMetricsStore: AIRunMetricsStore = AIRunMetricsStore(storage)
+
     init {
         val storedAppearance = storage.getString(APPEARANCE_STORAGE_KEY)
         _appearance = MutableStateFlow(AppAppearance.fromString(storedAppearance))

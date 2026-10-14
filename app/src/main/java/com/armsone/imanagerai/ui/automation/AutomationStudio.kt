@@ -44,6 +44,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
@@ -74,6 +75,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -81,8 +83,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
+import com.armsone.imanagerai.R
 import com.armsone.imanagerai.design.BrandTheme
 import com.armsone.imanagerai.design.GlossyPrimaryButton
+import com.armsone.imanagerai.model.AIProviderIdentity
 import com.armsone.imanagerai.model.AppAppearance
 import com.armsone.imanagerai.service.DirectAIProvider
 import com.armsone.imanagerai.ui.externalai.ExternalAIAnswerCleaner
@@ -96,14 +100,14 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Stargram 2.5.0 Automation Studio 전체 화면 서피스.
+ * Stargram Automation Studio 전체 화면 서피스.
  * Deep space obsidian 배경, 회전하는 블랙홀/포털 링, 엔진 플레어 모션,
  * 40x40 썸네일 스트립, 빛나는 마크다운 결과 카드, 인스타그램 공유 CTA를 포함한다.
  */
 @Composable
 fun AutomationStudio(
     state: AutomationSessionState,
-    onStartAutomation: (images: List<ByteArray>, provider: DirectAIProvider?) -> Unit,
+    onStartAutomation: (images: List<ByteArray>, provider: AIProviderIdentity?) -> Unit,
     onCancel: () -> Unit
 ) {
     if (state is AutomationSessionState.Idle) return
@@ -238,7 +242,8 @@ private fun AutomationStudioTopBar(
 }
 
 /**
- * 처리 중 화면: 회전하는 블랙홀/포털 링, 단계별 메시지, 1:59 역카운트다운 타이머 및 축소 프로그레스 바.
+ * 처리 중 화면: 회전하는 블랙홀/포털 링 + 현재 AI 아이콘, 단계별 메시지,
+ * 1:59 역카운트다운 타이머, 축소 프로그레스 바, 하단 AI 캐릭터 페르소나 배지.
  */
 @Composable
 private fun AutomationProcessingView(
@@ -254,12 +259,13 @@ private fun AutomationProcessingView(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        // 회전하는 포털 링
-        CosmicPortalCanvas(
+        // 회전하는 포털 링과 중심 AI 아이콘
+        CosmicPortal(
+            provider = state.provider,
             modifier = Modifier.size(190.dp)
         )
 
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
         // 단계 제목
         Text(
@@ -280,7 +286,7 @@ private fun AutomationProcessingView(
             textAlign = TextAlign.Center
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(20.dp))
 
         // 프로그레스 바 (119초 동안 1.0 -> 0.0으로 축소)
         Box(
@@ -301,11 +307,19 @@ private fun AutomationProcessingView(
                     )
             )
         }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // 하단 선택된 AI의 캐릭터풍 로고 배지 (기존 사람 실루엣 대체)
+        AutomationProviderPersonaBadge(
+            provider = state.provider,
+            modifier = Modifier.testTag("automation.personaBadge")
+        )
     }
 }
 
 /**
- * 결과 화면: 40x40 썸네일 스트립, 빛나는 마크다운 결과 카드, 인스타그램 CTA.
+ * 결과 화면: 40x40 썸네일 스트립, 빛나는 마크다운 결과 카드, AI 페르소나, 인스타그램 CTA.
  */
 @Composable
 private fun AutomationResultView(
@@ -403,9 +417,17 @@ private fun AutomationResultView(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // AI 캐릭터 페르소나 배지
+            AutomationProviderPersonaBadge(
+                provider = state.provider,
+                modifier = Modifier.testTag("automation.personaBadge")
+            )
         }
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         // 3. 인스타그램 버튼 & 보조 액션 행
         Column(
@@ -643,6 +665,133 @@ private fun InstagramShareCTA(
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
+        }
+    }
+}
+
+/**
+ * 선택된 AI의 캐릭터풍 로고 배지 + 글로우 (사람 실루엣 대체).
+ */
+@Composable
+fun AutomationProviderPersonaBadge(
+    provider: AIProviderIdentity,
+    modifier: Modifier = Modifier
+) {
+    val brandRes = when (provider) {
+        AIProviderIdentity.GEMINI -> R.drawable.brand_gemini
+        AIProviderIdentity.OPEN_AI -> R.drawable.brand_chatgpt
+        AIProviderIdentity.CLAUDE -> R.drawable.brand_claude
+        AIProviderIdentity.DEVICE -> null
+    }
+
+    Column(
+        modifier = modifier.padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(64.dp)
+                .shadow(14.dp, CircleShape, ambientColor = Color(0x44000000), spotColor = Color(0x66C7AD73))
+                .background(
+                    Brush.radialGradient(
+                        listOf(
+                            BrandTheme.interstellarAccent.copy(alpha = 0.35f),
+                            BrandTheme.interstellarSurface,
+                            Color(0xFF14161D)
+                        )
+                    ),
+                    CircleShape
+                )
+                .border(
+                    BorderStroke(
+                        1.5.dp,
+                        Brush.linearGradient(
+                            listOf(
+                                BrandTheme.interstellarAccent,
+                                BrandTheme.interstellarPlatinum.copy(alpha = 0.6f),
+                                BrandTheme.interstellarAccent.copy(alpha = 0.8f)
+                            )
+                        )
+                    ),
+                    CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            if (brandRes != null) {
+                Image(
+                    painter = painterResource(brandRes),
+                    contentDescription = provider.title,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.Android,
+                    contentDescription = provider.title,
+                    tint = Color(0xFF3DDC84),
+                    modifier = Modifier.size(34.dp)
+                )
+            }
+        }
+
+        Text(
+            text = "${provider.title} 캐릭터",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = BrandTheme.interstellarPlatinum,
+            letterSpacing = 0.4.sp
+        )
+    }
+}
+
+/**
+ * 우주 포털 / 블랙홀 링 + 중심 AI 아이콘.
+ */
+@Composable
+private fun CosmicPortal(
+    provider: AIProviderIdentity,
+    modifier: Modifier = Modifier
+) {
+    val brandRes = when (provider) {
+        AIProviderIdentity.GEMINI -> R.drawable.brand_gemini
+        AIProviderIdentity.OPEN_AI -> R.drawable.brand_chatgpt
+        AIProviderIdentity.CLAUDE -> R.drawable.brand_claude
+        AIProviderIdentity.DEVICE -> null
+    }
+
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center
+    ) {
+        CosmicPortalCanvas(modifier = Modifier.fillMaxSize())
+
+        Box(
+            modifier = Modifier
+                .size(46.dp)
+                .clip(CircleShape)
+                .background(Color(0xCC1A1B20)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (brandRes != null) {
+                Image(
+                    painter = painterResource(brandRes),
+                    contentDescription = provider.title,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.Android,
+                    contentDescription = provider.title,
+                    tint = Color(0xFF3DDC84),
+                    modifier = Modifier.size(28.dp)
+                )
+            }
         }
     }
 }

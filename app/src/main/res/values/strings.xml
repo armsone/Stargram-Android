@@ -3,5 +3,6 @@
     <!-- iOS INFOPLIST_KEY_CFBundleDisplayName = Stargram -->
     <string name="app_name">Stargram</string>
     <string name="shortcut_camera">카메라</string>
+    <string name="shortcut_automation">자동화</string>
     <string name="theme_interstellar">인터스텔라</string>
 </resources>

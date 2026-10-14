@@ -11,4 +11,15 @@
             android:targetPackage="com.armsone.starmanager"
             android:targetClass="com.armsone.imanagerai.MainActivity" />
     </shortcut>
+    <shortcut
+        android:shortcutId="automation_start"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_automation"
+        android:shortcutShortLabel="@string/shortcut_automation"
+        android:shortcutLongLabel="@string/shortcut_automation">
+        <intent
+            android:action="com.armsone.imanagerai.action.AUTOMATION"
+            android:targetPackage="com.armsone.starmanager"
+            android:targetClass="com.armsone.imanagerai.MainActivity" />
+    </shortcut>
 </shortcuts>

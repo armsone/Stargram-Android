@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Settings
@@ -69,6 +70,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.armsone.imanagerai.design.BrandTheme
 import com.armsone.imanagerai.design.LocalAppAppearance
+import com.armsone.imanagerai.model.AIProviderAvailabilityStore
+import com.armsone.imanagerai.model.AIProviderIdentity
+import com.armsone.imanagerai.model.AIRunMetricsStore
 import com.armsone.imanagerai.model.AppAppearance
 import com.armsone.imanagerai.model.CreatorProfileStore
 import com.armsone.imanagerai.model.SharedPreferencesKeyValueStore
@@ -117,6 +121,11 @@ class MainActivity : ComponentActivity() {
             storage.remove(CreatorProfileStore.SHOW_EXTERNAL_AI_BROWSER_STORAGE_KEY)
             storage.remove(CreatorProfileStore.AUTOMATION_ENABLED_STORAGE_KEY)
             storage.remove(ComposerViewModel.KEY_PASTE_GUIDANCE_SHOWN)
+            storage.remove(AIProviderAvailabilityStore.OPEN_AI_KEY)
+            storage.remove(AIProviderAvailabilityStore.GEMINI_KEY)
+            storage.remove(AIProviderAvailabilityStore.CLAUDE_KEY)
+            storage.remove(AIProviderAvailabilityStore.LAST_USED_KEY)
+            storage.remove(AIRunMetricsStore.STORAGE_KEY)
             FixtureHooks.resetStateRequested = false
         }
         profileStore = CreatorProfileStore(storage)
@@ -175,7 +184,7 @@ class MainActivity : ComponentActivity() {
         lastStopElapsedRealtimeMs = SystemClock.elapsedRealtime()
     }
 
-    /** 외부 공유(SEND/SEND_MULTIPLE), 카메라 런처 숏컷 및 딥링크는 자동화 설정과 무관하게 항상 동작한다. */
+    /** 외부 공유(SEND/SEND_MULTIPLE), 카메라/자동화 런처 숏컷 및 딥링크는 자동화 설정과 무관하게 항상 동작한다. */
     private fun handleIncomingIntent(intent: Intent) {
         when (intent.action) {
             Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE -> {
@@ -185,6 +194,10 @@ class MainActivity : ComponentActivity() {
             ACTION_CAMERA_CAPTURE, ALIAS_ACTION_CAMERA_CAPTURE, LEGACY_ACTION_CAMERA_CAPTURE -> {
                 incomingExplicitIntentHandled = true
                 cameraShortcutTrigger.value += 1
+            }
+            ACTION_AUTOMATION, ALIAS_ACTION_AUTOMATION, LEGACY_ACTION_AUTOMATION -> {
+                incomingExplicitIntentHandled = true
+                automationPickerTrigger.value += 1
             }
             Intent.ACTION_VIEW -> {
                 incomingExplicitIntentHandled = true
@@ -201,6 +214,9 @@ class MainActivity : ComponentActivity() {
         val path = uri.path.orEmpty()
         if (host == "camera" || path.contains("camera")) {
             cameraShortcutTrigger.value += 1
+        }
+        if (host == "automation" || path.contains("automation") || host == "auto" || path.contains("auto")) {
+            automationPickerTrigger.value += 1
         }
         val textParam = uri.getQueryParameter("text") ?: uri.getQueryParameter("idea")
         if (!textParam.isNullOrBlank()) {
@@ -249,6 +265,9 @@ class MainActivity : ComponentActivity() {
         private const val ACTION_CAMERA_CAPTURE = "com.armsone.imanagerai.action.CAMERA_CAPTURE"
         private const val ALIAS_ACTION_CAMERA_CAPTURE = "com.armsone.imanager.action.CAMERA_CAPTURE"
         private const val LEGACY_ACTION_CAMERA_CAPTURE = "com.armsone.starmanager.action.CAMERA_CAPTURE"
+        private const val ACTION_AUTOMATION = "com.armsone.imanagerai.action.AUTOMATION"
+        private const val ALIAS_ACTION_AUTOMATION = "com.armsone.imanager.action.AUTOMATION"
+        private const val LEGACY_ACTION_AUTOMATION = "com.armsone.starmanager.action.AUTOMATION"
         private const val ORDINARY_AUTOMATION_RETURN_THRESHOLD_MS = 15_000L
     }
 
@@ -293,8 +312,8 @@ fun IManagerAITheme(
 }
 
 private enum class AppTab(val title: String) {
-    COMPOSER("스튜디오"),
-    SETTINGS("설정")
+    COMPOSER("Studio"),
+    SETTINGS("Setting")
 }
 
 @Composable
@@ -343,6 +362,8 @@ private fun IManagerAIApp(
 
         BottomTabBar(
             selectedIndex = selectedTab,
+            profileStore = profileStore,
+            composerViewModel = composerViewModel,
             appearance = appearance,
             onSelect = {
                 selectedTab = it
@@ -471,15 +492,24 @@ private fun TopBar(
     }
 }
 
-/** 탭바 — 스튜디오/새 캔버스/설정 */
+/** 탭바 — Studio(또는 Send)/New/Setting */
 @Composable
 private fun BottomTabBar(
     selectedIndex: Int,
+    profileStore: CreatorProfileStore,
+    composerViewModel: ComposerViewModel,
     appearance: AppAppearance = LocalAppAppearance.current,
     onSelect: (Int) -> Unit,
     onReset: () -> Unit
 ) {
     val barShape = RoundedCornerShape(32.dp)
+    val composerState by composerViewModel.state.collectAsStateWithLifecycle()
+    val lastUsedChoice by profileStore.availabilityStore.lastUsedChoice.collectAsStateWithLifecycle()
+    val activeAI = profileStore.availabilityStore.resolvedChoice(preferring = lastUsedChoice)
+    val hasMediaOrText = composerViewModel.hasMediaOrText()
+
+    val tab0Title = if (hasMediaOrText) "Send" else "Studio"
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -497,45 +527,116 @@ private fun BottomTabBar(
                 .padding(4.dp)
         ) {
             BottomTabButton(
-                title = AppTab.COMPOSER.title,
-                icon = tabIcon(AppTab.COMPOSER),
+                title = tab0Title,
                 selected = selectedIndex == 0,
                 appearance = appearance,
-                onClick = { onSelect(0) },
+                onClick = {
+                    if (hasMediaOrText) {
+                        onSelect(0)
+                        if (!composerState.isGenerating) {
+                            when (activeAI) {
+                                AIProviderIdentity.DEVICE -> composerViewModel.generateDraft()
+                                AIProviderIdentity.GEMINI -> composerViewModel.startExternalGeneration(com.armsone.imanagerai.service.DirectAIProvider.GEMINI)
+                                AIProviderIdentity.OPEN_AI -> composerViewModel.startExternalGeneration(com.armsone.imanagerai.service.DirectAIProvider.OPEN_AI)
+                                AIProviderIdentity.CLAUDE -> composerViewModel.startExternalGeneration(com.armsone.imanagerai.service.DirectAIProvider.CLAUDE)
+                            }
+                        }
+                    } else {
+                        onSelect(0)
+                    }
+                },
                 testTag = "tab.COMPOSER",
                 modifier = Modifier.weight(1f)
-            )
+            ) {
+                StudioTabIcon(
+                    hasMediaOrText = hasMediaOrText,
+                    activeAI = activeAI,
+                    tint = if (selectedIndex == 0) BrandTheme.labelPrimary(appearance) else BrandTheme.labelSecondary(appearance)
+                )
+            }
             BottomTabButton(
-                title = "새 캔버스",
-                icon = Icons.Filled.RestartAlt,
+                title = "New",
                 selected = false,
                 appearance = appearance,
                 onClick = onReset,
                 testTag = "tab.RESET",
                 modifier = Modifier.weight(1f)
-            )
+            ) {
+                Icon(
+                    Icons.Filled.RestartAlt,
+                    contentDescription = "New",
+                    tint = BrandTheme.labelSecondary(appearance),
+                    modifier = Modifier.size(24.dp)
+                )
+            }
             BottomTabButton(
                 title = AppTab.SETTINGS.title,
-                icon = tabIcon(AppTab.SETTINGS),
                 selected = selectedIndex == 1,
                 appearance = appearance,
                 onClick = { onSelect(1) },
                 testTag = "tab.SETTINGS",
                 modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    Icons.Filled.Settings,
+                    contentDescription = AppTab.SETTINGS.title,
+                    tint = if (selectedIndex == 1) BrandTheme.labelPrimary(appearance) else BrandTheme.labelSecondary(appearance),
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StudioTabIcon(
+    hasMediaOrText: Boolean,
+    activeAI: AIProviderIdentity,
+    tint: Color
+) {
+    if (hasMediaOrText) {
+        val brandRes = when (activeAI) {
+            AIProviderIdentity.GEMINI -> R.drawable.brand_gemini
+            AIProviderIdentity.OPEN_AI -> R.drawable.brand_chatgpt
+            AIProviderIdentity.CLAUDE -> R.drawable.brand_claude
+            AIProviderIdentity.DEVICE -> null
+        }
+        if (brandRes != null) {
+            Image(
+                painter = painterResource(brandRes),
+                contentDescription = activeAI.title,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(RoundedCornerShape(6.dp))
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Filled.Android,
+                contentDescription = activeAI.title,
+                tint = Color(0xFF3DDC84),
+                modifier = Modifier.size(24.dp)
             )
         }
+    } else {
+        Icon(
+            imageVector = Icons.Filled.AutoAwesome,
+            contentDescription = "Studio",
+            tint = tint,
+            modifier = Modifier.size(24.dp)
+        )
     }
 }
 
 @Composable
 private fun BottomTabButton(
     title: String,
-    icon: ImageVector,
     selected: Boolean,
     appearance: AppAppearance,
     onClick: () -> Unit,
     testTag: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    icon: @Composable () -> Unit
 ) {
     val tint = if (selected) BrandTheme.labelPrimary(appearance) else BrandTheme.labelSecondary(appearance)
     val itemShape = RoundedCornerShape(26.dp)
@@ -553,17 +654,7 @@ private fun BottomTabButton(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Icon(
-            icon,
-            contentDescription = title,
-            tint = tint,
-            modifier = Modifier.size(24.dp)
-        )
+        icon()
         Text(title, fontSize = 10.sp, color = tint, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
     }
-}
-
-private fun tabIcon(tab: AppTab): ImageVector = when (tab) {
-    AppTab.COMPOSER -> Icons.Filled.AutoAwesome
-    AppTab.SETTINGS -> Icons.Filled.Settings
 }

@@ -21,13 +21,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.ArrowCircleDown
 import androidx.compose.material.icons.outlined.Diamond
@@ -58,21 +60,27 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.armsone.imanagerai.R
 import com.armsone.imanagerai.design.BrandTheme
 import com.armsone.imanagerai.design.IconWell
 import com.armsone.imanagerai.design.IconWellVariant
 import com.armsone.imanagerai.design.LocalAppAppearance
 import com.armsone.imanagerai.design.StarSegmentedControl
 import com.armsone.imanagerai.design.StarSwitch
+import com.armsone.imanagerai.model.AIProviderIdentity
+import com.armsone.imanagerai.model.AIRunMetricsFormatter
 import com.armsone.imanagerai.model.AppAppearance
 import com.armsone.imanagerai.model.CreatorProfileStore
 import com.armsone.imanagerai.service.DirectAIProvider
@@ -86,9 +94,10 @@ import kotlinx.coroutines.launch
 
 /**
  * "설정" 화면.
- * 1. 외부 로그인 관리 (브라우저 보기 토글, Gemini, ChatGPT, Claude)
- * 2. 앱 업데이트 관리
- * 3. 테마 관리 (BK / 클래식 외형 전환)
+ * 1. 자동화 설정
+ * 2. AI 사용 및 로그인 (사용 토글, 실행 메트릭, 로그인 상태/진입, 브라우저 보기, 로그아웃)
+ * 3. 앱 업데이트 관리
+ * 4. 테마 관리 (BK / 클래식 / 인터스텔라 외형 전환)
  */
 @Composable
 fun ProfileSettingsScreen(store: CreatorProfileStore) {
@@ -97,6 +106,10 @@ fun ProfileSettingsScreen(store: CreatorProfileStore) {
     val appearance by store.appearance.collectAsStateWithLifecycle()
     val showsExternalAIBrowser by store.showsExternalAIBrowser.collectAsStateWithLifecycle()
     val automationEnabled by store.automationEnabled.collectAsStateWithLifecycle()
+    val isOpenAIEnabled by store.availabilityStore.isOpenAIEnabled.collectAsStateWithLifecycle()
+    val isGeminiEnabled by store.availabilityStore.isGeminiEnabled.collectAsStateWithLifecycle()
+    val isClaudeEnabled by store.availabilityStore.isClaudeEnabled.collectAsStateWithLifecycle()
+    val metrics by store.runMetricsStore.metrics.collectAsStateWithLifecycle()
 
     var activeLoginProvider by remember { mutableStateOf<DirectAIProvider?>(null) }
     var showsLogoutConfirmation by remember { mutableStateOf(false) }
@@ -182,14 +195,136 @@ fun ProfileSettingsScreen(store: CreatorProfileStore) {
                     }
                 }
 
-                // 2. 외부 로그인 관리
+                // 2. AI 사용 및 로그인
                 SettingsSection(
-                    header = "외부 로그인 관리",
-                    icon = Icons.Filled.AccountCircle,
-                    footer = "서비스 행을 누르면 공식 로그인 화면을 열 수 있어요. 모든 외부 AI 로그아웃은 이 앱의 Gemini, ChatGPT, Claude 웹 세션을 함께 지워요. Stargram는 비밀번호를 보거나 저장하지 않아요.",
+                    header = "AI 사용 및 로그인",
+                    icon = Icons.Filled.Tune,
+                    footer = "자주 쓰는 AI를 켜두면 작성이 빨라져요. 로그인 영역을 누르면 공식 로그인 화면을 열 수 있어요. 모든 외부 AI 로그아웃은 이 앱의 Gemini, ChatGPT, Claude 웹 세션을 함께 지워요. Stargram은 비밀번호를 보거나 저장하지 않아요.",
                     appearance = appearance,
-                    variant = IconWellVariant.CARBON
+                    variant = IconWellVariant.ACCENT
                 ) {
+                    // ChatGPT
+                    AIProviderSettingRow(
+                        icon = {
+                            Image(
+                                painter = painterResource(R.drawable.brand_chatgpt),
+                                contentDescription = "ChatGPT",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                            )
+                        },
+                        title = "ChatGPT",
+                        subtitle = AIRunMetricsFormatter.formatSubtitle(metrics[AIProviderIdentity.OPEN_AI]),
+                        checked = isOpenAIEnabled,
+                        onCheckedChange = { store.availabilityStore.setOpenAIEnabled(it) },
+                        authState = authStates[DirectAIProvider.OPEN_AI] ?: ExternalAIAuthState.CHECKING,
+                        onLoginClick = {
+                            ExternalAIAuthStatus.markLoginFlowStarted(context, DirectAIProvider.OPEN_AI)
+                            activeLoginProvider = DirectAIProvider.OPEN_AI
+                        },
+                        providerKey = DirectAIProvider.OPEN_AI.rawValue,
+                        appearance = appearance,
+                        testTag = "settings.aiProvider.openAI"
+                    )
+
+                    HorizontalDivider(color = BrandTheme.divider(appearance))
+
+                    // Gemini
+                    AIProviderSettingRow(
+                        icon = {
+                            Image(
+                                painter = painterResource(R.drawable.brand_gemini),
+                                contentDescription = "Gemini",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                            )
+                        },
+                        title = "Gemini",
+                        subtitle = AIRunMetricsFormatter.formatSubtitle(metrics[AIProviderIdentity.GEMINI]),
+                        checked = isGeminiEnabled,
+                        onCheckedChange = { store.availabilityStore.setGeminiEnabled(it) },
+                        authState = authStates[DirectAIProvider.GEMINI] ?: ExternalAIAuthState.CHECKING,
+                        onLoginClick = {
+                            ExternalAIAuthStatus.markLoginFlowStarted(context, DirectAIProvider.GEMINI)
+                            activeLoginProvider = DirectAIProvider.GEMINI
+                        },
+                        providerKey = DirectAIProvider.GEMINI.rawValue,
+                        appearance = appearance,
+                        testTag = "settings.aiProvider.gemini"
+                    )
+
+                    HorizontalDivider(color = BrandTheme.divider(appearance))
+
+                    // Claude
+                    AIProviderSettingRow(
+                        icon = {
+                            Image(
+                                painter = painterResource(R.drawable.brand_claude),
+                                contentDescription = "Claude",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                            )
+                        },
+                        title = "Claude",
+                        subtitle = AIRunMetricsFormatter.formatSubtitle(metrics[AIProviderIdentity.CLAUDE]),
+                        checked = isClaudeEnabled,
+                        onCheckedChange = { store.availabilityStore.setClaudeEnabled(it) },
+                        authState = authStates[DirectAIProvider.CLAUDE] ?: ExternalAIAuthState.CHECKING,
+                        onLoginClick = {
+                            ExternalAIAuthStatus.markLoginFlowStarted(context, DirectAIProvider.CLAUDE)
+                            activeLoginProvider = DirectAIProvider.CLAUDE
+                        },
+                        providerKey = DirectAIProvider.CLAUDE.rawValue,
+                        appearance = appearance,
+                        testTag = "settings.aiProvider.claude"
+                    )
+
+                    HorizontalDivider(color = BrandTheme.divider(appearance))
+
+                    // 온디바이스 AI (항상 켜짐)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 10.dp)
+                            .testTag("settings.aiProvider.device"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Android,
+                            contentDescription = "온디바이스 AI",
+                            tint = Color(0xFF3DDC84),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "온디바이스 AI",
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = BrandTheme.labelPrimary(appearance)
+                            )
+                            Text(
+                                AIRunMetricsFormatter.formatSubtitle(metrics[AIProviderIdentity.DEVICE]),
+                                fontSize = 12.sp,
+                                color = BrandTheme.labelSecondary(appearance)
+                            )
+                        }
+                        Text(
+                            "항상 켜짐",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = BrandTheme.labelSecondary(appearance)
+                        )
+                    }
+
+                    HorizontalDivider(color = BrandTheme.divider(appearance))
+
                     // 브라우저 보기 토글
                     Row(
                         Modifier
@@ -222,61 +357,6 @@ fun ProfileSettingsScreen(store: CreatorProfileStore) {
 
                     HorizontalDivider(color = BrandTheme.divider(appearance))
 
-                    // 로그인 제공사 행들
-                    val providers = listOf(DirectAIProvider.GEMINI, DirectAIProvider.OPEN_AI, DirectAIProvider.CLAUDE)
-                    providers.forEachIndexed { index, provider ->
-                        if (index > 0) {
-                            HorizontalDivider(color = BrandTheme.divider(appearance))
-                        }
-                        val state = authStates[provider] ?: ExternalAIAuthState.CHECKING
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    ExternalAIAuthStatus.markLoginFlowStarted(context, provider)
-                                    activeLoginProvider = provider
-                                }
-                                .padding(vertical = 12.dp)
-                                .testTag("settings.loginRow.${provider.rawValue}"),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Text(
-                                provider.title,
-                                fontSize = 17.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = BrandTheme.labelPrimary(appearance),
-                                modifier = Modifier.weight(1f)
-                            )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.testTag("settings.login.${provider.rawValue}")
-                            ) {
-                                if (state == ExternalAIAuthState.LOGGED_IN) {
-                                    Icon(
-                                        Icons.Filled.CheckCircle,
-                                        contentDescription = null,
-                                        tint = Color(0xFF34C759),
-                                        modifier = Modifier.size(17.dp)
-                                    )
-                                }
-                                Text(
-                                    state.label,
-                                    fontSize = 15.sp,
-                                    fontWeight = if (state == ExternalAIAuthState.REQUIRES_LOGIN) FontWeight.SemiBold else FontWeight.Normal,
-                                    color = when (state) {
-                                        ExternalAIAuthState.REQUIRES_LOGIN -> BrandTheme.accent
-                                        ExternalAIAuthState.LOGGED_IN -> Color(0xFF34C759)
-                                        ExternalAIAuthState.CHECKING,
-                                        ExternalAIAuthState.UNKNOWN -> BrandTheme.labelSecondary(appearance)
-                                    }
-                                )
-                            }
-                        }
-                    }
-
-                    HorizontalDivider(color = BrandTheme.divider(appearance))
                     TextButton(
                         onClick = {
                             scope.launch {
@@ -310,6 +390,7 @@ fun ProfileSettingsScreen(store: CreatorProfileStore) {
                         modifier = Modifier.testTag("settings.aibi.shareDiagnostics")
                     ) { Text("최근 AI 진단 로그 공유") }
 
+                    // 상태 다시 확인 / 모두 로그아웃
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -333,7 +414,7 @@ fun ProfileSettingsScreen(store: CreatorProfileStore) {
                     }
                 }
 
-                // 2. 앱 업데이트 관리
+                // 3. 앱 업데이트 관리
                 SettingsSection(
                     header = "앱 업데이트 관리",
                     icon = Icons.Outlined.ArrowCircleDown,
@@ -344,7 +425,7 @@ fun ProfileSettingsScreen(store: CreatorProfileStore) {
                     DirectUpdateSettings(updateManager)
                 }
 
-                // 3. 테마 관리 (BK / 클래식 / 인터스텔라 외형 전환)
+                // 4. 테마 관리 (BK / 클래식 / 인터스텔라 외형 전환)
                 SettingsSection(
                     header = "테마 관리",
                     icon = Icons.Outlined.Diamond,
@@ -484,5 +565,80 @@ private fun SettingsSection(
                 modifier = Modifier.padding(start = 4.dp, top = 6.dp, end = 4.dp)
             )
         }
+    }
+}
+
+@Composable
+private fun AIProviderSettingRow(
+    icon: @Composable () -> Unit,
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    appearance: AppAppearance,
+    testTag: String,
+    authState: ExternalAIAuthState? = null,
+    onLoginClick: (() -> Unit)? = null,
+    providerKey: String? = null
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        icon()
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Medium,
+                color = BrandTheme.labelPrimary(appearance)
+            )
+            Text(
+                subtitle,
+                fontSize = 12.sp,
+                color = BrandTheme.labelSecondary(appearance)
+            )
+        }
+        if (authState != null && onLoginClick != null && providerKey != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onLoginClick)
+                    .padding(horizontal = 6.dp, vertical = 6.dp)
+                    .testTag("settings.loginRow.$providerKey")
+            ) {
+                if (authState == ExternalAIAuthState.LOGGED_IN) {
+                    Icon(
+                        Icons.Filled.CheckCircle,
+                        contentDescription = null,
+                        tint = Color(0xFF34C759),
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+                Text(
+                    authState.label,
+                    fontSize = 14.sp,
+                    fontWeight = if (authState == ExternalAIAuthState.REQUIRES_LOGIN) FontWeight.SemiBold else FontWeight.Normal,
+                    color = when (authState) {
+                        ExternalAIAuthState.REQUIRES_LOGIN -> BrandTheme.accent
+                        ExternalAIAuthState.LOGGED_IN -> Color(0xFF34C759)
+                        ExternalAIAuthState.CHECKING,
+                        ExternalAIAuthState.UNKNOWN -> BrandTheme.labelSecondary(appearance)
+                    },
+                    modifier = Modifier.testTag("settings.login.$providerKey")
+                )
+            }
+        }
+        StarSwitch(
+            checked = checked,
+            appearance = appearance,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.testTag(testTag)
+        )
     }
 }

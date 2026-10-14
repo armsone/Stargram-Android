@@ -90,10 +90,11 @@ class ComposerMedia(
     val id: String = UUID.randomUUID().toString()
 )
 
-/** 만들기 카드의 AI 선택 버튼 — Gemini, ChatGPT, Claude, 기기 AI. */
+/** 만들기 카드의 AI 선택 버튼 — Gemini, ChatGPT, Claude, 기기 AI, Random. */
 sealed class AIChoice(val id: String, val title: String) {
     data object OnDevice : AIChoice("device-ai", "AI")
     data class External(val provider: DirectAIProvider) : AIChoice(provider.rawValue, provider.title)
+    data object Random : AIChoice("random", "Random")
 
     fun isEnabled(trimmedIdea: String, hasRepresentativePhoto: Boolean): Boolean =
         trimmedIdea.isNotEmpty() || hasRepresentativePhoto
@@ -103,7 +104,8 @@ sealed class AIChoice(val id: String, val title: String) {
             External(DirectAIProvider.GEMINI),
             External(DirectAIProvider.OPEN_AI),
             External(DirectAIProvider.CLAUDE),
-            OnDevice
+            OnDevice,
+            Random
         )
         val all: List<AIChoice> = visibleChoices
     }

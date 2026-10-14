@@ -73,6 +73,7 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -158,6 +159,7 @@ import com.armsone.imanagerai.design.StarSegmentedControl
 import com.armsone.imanagerai.design.StarSlider
 import com.armsone.imanagerai.design.oxbloodPreferenceCard
 import com.armsone.imanagerai.design.starCard
+import com.armsone.imanagerai.model.AIProviderIdentity
 import com.armsone.imanagerai.model.AppAppearance
 import com.armsone.imanagerai.model.AudienceAgeGroup
 import com.armsone.imanagerai.model.CreatorProfile
@@ -168,6 +170,7 @@ import com.armsone.imanagerai.model.PostMood
 import com.armsone.imanagerai.model.PostStyle
 import com.armsone.imanagerai.model.PostTone
 import com.armsone.imanagerai.service.DirectAIProvider
+import com.armsone.imanagerai.ui.automation.AutomationProviderSelector
 import com.armsone.imanagerai.ui.automation.AutomationSessionState
 import com.armsone.imanagerai.ui.automation.AutomationStudio
 import com.armsone.imanagerai.ui.externalai.ExternalAIAttachment
@@ -343,9 +346,10 @@ fun ComposerScreen(
 
     if (automationSessionState is AutomationSessionState.Processing) {
         val processing = automationSessionState as AutomationSessionState.Processing
-        if (processing.attachments.isNotEmpty()) {
+        val extProvider = processing.provider.externalProvider
+        if (extProvider != null && processing.attachments.isNotEmpty()) {
             HiddenExternalAIWebView(
-                provider = processing.provider,
+                provider = extProvider,
                 prompt = profile.photoOnlyPrompt(profile.mood, profile.preferredLength, processing.attachments.size),
                 attachments = processing.attachments,
                 requestId = processing.requestId,
@@ -1013,21 +1017,56 @@ private fun AiChoiceButtons(viewModel: ComposerViewModel, state: ComposerUiState
     val context = LocalContext.current
     val appearance = LocalAppAppearance.current
     val showsExternalAIBrowser by viewModel.profileStore.showsExternalAIBrowser.collectAsStateWithLifecycle()
-        val hasGenerationInput = state.idea.trim().isNotEmpty() || viewModel.hasRepresentativePhoto
-        val isEnabled = !state.isGenerating && hasGenerationInput
+    val isOpenAIEnabled by viewModel.profileStore.availabilityStore.isOpenAIEnabled.collectAsStateWithLifecycle()
+    val isGeminiEnabled by viewModel.profileStore.availabilityStore.isGeminiEnabled.collectAsStateWithLifecycle()
+    val isClaudeEnabled by viewModel.profileStore.availabilityStore.isClaudeEnabled.collectAsStateWithLifecycle()
+
+    val hasGenerationInput = state.idea.trim().isNotEmpty() || viewModel.hasRepresentativePhoto
+    val isEnabled = !state.isGenerating && hasGenerationInput
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        val columns = 4
+        val columns = 5
         AIChoice.all.chunked(columns).forEach { rowChoices ->
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 rowChoices.forEach { choice ->
+                    val isProviderEnabled = when (choice) {
+                        AIChoice.OnDevice -> true
+                        is AIChoice.External -> when (choice.provider) {
+                            DirectAIProvider.GEMINI -> isGeminiEnabled
+                            DirectAIProvider.OPEN_AI -> isOpenAIEnabled
+                            DirectAIProvider.CLAUDE -> isClaudeEnabled
+                            DirectAIProvider.GROK -> false
+                        }
+                        AIChoice.Random -> true
+                    }
+                    val isButtonEnabled = isEnabled && isProviderEnabled
+
                     AIChoiceCard(
                         choice = choice,
-                        enabled = isEnabled,
+                        enabled = isButtonEnabled,
                         onClick = {
                             when (choice) {
-                                AIChoice.OnDevice -> viewModel.generateDraft()
-                                is AIChoice.External -> viewModel.startExternalGeneration(choice.provider)
+                                AIChoice.OnDevice -> {
+                                    viewModel.profileStore.availabilityStore.recordUsed(AIProviderIdentity.DEVICE)
+                                    viewModel.generateDraft()
+                                }
+                                is AIChoice.External -> {
+                                    AIProviderIdentity.fromExternalProvider(choice.provider)?.let {
+                                        viewModel.profileStore.availabilityStore.recordUsed(it)
+                                    }
+                                    viewModel.startExternalGeneration(choice.provider)
+                                }
+                                AIChoice.Random -> {
+                                    val candidates = viewModel.profileStore.availabilityStore.enabledCandidates
+                                    val picked = AutomationProviderSelector.selectRandom(candidates = candidates)
+                                    viewModel.profileStore.availabilityStore.recordUsed(picked)
+                                    when (picked) {
+                                        AIProviderIdentity.DEVICE -> viewModel.generateDraft()
+                                        AIProviderIdentity.GEMINI -> viewModel.startExternalGeneration(DirectAIProvider.GEMINI)
+                                        AIProviderIdentity.OPEN_AI -> viewModel.startExternalGeneration(DirectAIProvider.OPEN_AI)
+                                        AIProviderIdentity.CLAUDE -> viewModel.startExternalGeneration(DirectAIProvider.CLAUDE)
+                                    }
+                                }
                             }
                         },
                         modifier = Modifier
@@ -1157,6 +1196,15 @@ private fun GenerationStatusCard(
         label = "generation_status_angle"
     )
 
+    val currentProvider = state.activeAutomationProvider ?: state.pendingExternalProvider
+    val brandRes = when (currentProvider) {
+        DirectAIProvider.GEMINI -> R.drawable.brand_gemini
+        DirectAIProvider.OPEN_AI -> R.drawable.brand_chatgpt
+        DirectAIProvider.CLAUDE -> R.drawable.brand_claude
+        DirectAIProvider.GROK -> R.drawable.brand_grok
+        null -> null
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1167,14 +1215,26 @@ private fun GenerationStatusCard(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Icon(
-            imageVector = Icons.Filled.AutoAwesome,
-            contentDescription = "AI가 글을 만드는 중",
-            tint = BrandTheme.accent,
-            modifier = Modifier
-                .size(24.dp)
-                .graphicsLayer { rotationZ = rotation }
-        )
+        if (brandRes != null) {
+            Image(
+                painter = painterResource(brandRes),
+                contentDescription = currentProvider?.title ?: "AI",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .graphicsLayer { rotationZ = rotation }
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Filled.Android,
+                contentDescription = "기기 AI",
+                tint = Color(0xFF3DDC84),
+                modifier = Modifier
+                    .size(24.dp)
+                    .graphicsLayer { rotationZ = rotation }
+            )
+        }
 
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
@@ -1975,5 +2035,11 @@ private fun AIChoiceMark(choice: AIChoice) {
                     .clip(RoundedCornerShape(7.dp))
             )
         }
+        AIChoice.Random -> Icon(
+            imageVector = Icons.Filled.Casino,
+            contentDescription = choice.title,
+            tint = BrandTheme.accent,
+            modifier = Modifier.size(24.dp)
+        )
     }
 }

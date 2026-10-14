@@ -12,6 +12,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.armsone.imanagerai.FixtureHooks
+import com.armsone.imanagerai.model.AIProviderIdentity
 import com.armsone.imanagerai.model.CaptionValidationContext
 import com.armsone.imanagerai.model.CaptionValidationReport
 import com.armsone.imanagerai.model.CreatorProfileStore
@@ -89,6 +90,7 @@ class ComposerViewModel : ViewModel() {
     private var automationRequestIdCounter = 0
     private var resetVersion = 0
     private var isOrdinaryAutomationSession = false
+    private var externalGenerationStartTime = 0L
 
     private fun update(transform: (ComposerUiState) -> ComposerUiState) {
         _state.value = transform(_state.value)
@@ -110,6 +112,8 @@ class ComposerViewModel : ViewModel() {
         ExternalAIImageNormalizer.normalizeOrdered(
             _state.value.mediaItems.filter { it.kind == MediaKind.IMAGE }.map { it.data }
         )
+
+    fun hasMediaOrText(): Boolean = trimmedIdea.isNotEmpty() || _state.value.mediaItems.isNotEmpty()
 
     fun hasContent(): Boolean = _state.value.run {
         idea.isNotEmpty() || generatedPost != null || mediaItems.isNotEmpty() || captionCandidates.isNotEmpty() || pendingExternalProvider != null || isGenerating || _automationSessionState.value !is AutomationSessionState.Idle
@@ -168,14 +172,19 @@ class ComposerViewModel : ViewModel() {
     }
 
     /** 외부 공유 인텐트나 결과 화면의 재시도에서 호출된다. 최초 호출이면 일반 자동화 표시를 지운다. */
-    fun startPhotoAutomation(rawImages: List<ByteArray>, provider: DirectAIProvider? = null) {
+    fun startPhotoAutomation(rawImages: List<ByteArray>, provider: AIProviderIdentity? = null) {
         if (provider == null) isOrdinaryAutomationSession = false
         startPhotoAutomationInternal(rawImages, provider)
     }
 
-    private fun startPhotoAutomationInternal(rawImages: List<ByteArray>, provider: DirectAIProvider?) {
+    private fun startPhotoAutomationInternal(rawImages: List<ByteArray>, provider: AIProviderIdentity?) {
         if (rawImages.isEmpty()) return
-        val targetProvider = provider ?: AutomationProviderSelector.selectRandom()
+        val candidates = if (::profileStore.isInitialized) {
+            profileStore.availabilityStore.enabledCandidates
+        } else {
+            AutomationProviderSelector.ELIGIBLE_IDENTITIES
+        }
+        val targetProvider = provider ?: AutomationProviderSelector.selectRandom(candidates = candidates)
         val count = rawImages.size.coerceIn(1, 8)
         val images = rawImages.take(count)
         automationTimerJob?.cancel()
@@ -204,6 +213,27 @@ class ComposerViewModel : ViewModel() {
                         stepTitle = "${targetProvider.title}에 연결하는 중…",
                         stepSubtitle = "사진 ${attachments.size}장과 입력창을 준비하고 있어요"
                     )
+
+                    // 온디바이스 AI인 경우 즉시 로컬 생성 파이프라인 실행
+                    if (targetProvider == AIProviderIdentity.DEVICE) {
+                        val genStart = System.currentTimeMillis()
+                        val profile = profileStore.profile.value
+                        val generator = DeterministicCaptionGenerator(
+                            simulatedDelayMillis = FixtureHooks.captionDelayMillis ?: 550L
+                        )
+                        val post = generator.generate(
+                            idea = "",
+                            mood = profile.mood,
+                            length = profile.preferredLength,
+                            profile = profile
+                        )
+                        val elapsed = (System.currentTimeMillis() - genStart) / 1000.0
+                        if (::profileStore.isInitialized) {
+                            profileStore.runMetricsStore.recordRun(AIProviderIdentity.DEVICE, elapsed)
+                            profileStore.availabilityStore.recordUsed(AIProviderIdentity.DEVICE)
+                        }
+                        onAutomationStudioSuccess(post.composedText, context = null)
+                    }
                 }
             } catch (_: CancellationException) {
                 return@launch
@@ -265,7 +295,12 @@ class ComposerViewModel : ViewModel() {
         automationTimerJob?.cancel()
         val current = _automationSessionState.value
         if (current !is AutomationSessionState.Processing) return
-        val cleaned = ExternalAIAnswerCleaner.clean(answer, current.provider)
+        val extProvider = current.provider.externalProvider
+        val cleaned = if (extProvider != null) {
+            ExternalAIAnswerCleaner.clean(answer, extProvider)
+        } else {
+            answer.trim()
+        }
         if (cleaned.isBlank()) {
             _automationSessionState.value = AutomationSessionState.Failure(
                 lastProvider = current.provider,
@@ -279,6 +314,10 @@ class ComposerViewModel : ViewModel() {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             clipboard?.setPrimaryClip(ClipData.newPlainText("Stargram", cleaned))
         }
+        if (::profileStore.isInitialized) {
+            profileStore.runMetricsStore.recordRun(current.provider, current.elapsedSeconds.toDouble())
+            profileStore.availabilityStore.recordUsed(current.provider)
+        }
         _automationSessionState.value = AutomationSessionState.Result(
             provider = current.provider,
             generatedText = cleaned,
@@ -287,12 +326,14 @@ class ComposerViewModel : ViewModel() {
         )
     }
 
-    fun onAutomationStudioError(rawError: String?, provider: DirectAIProvider? = null) {
+    fun onAutomationStudioError(rawError: String?, provider: AIProviderIdentity? = null) {
         automationTimerJob?.cancel()
         val current = _automationSessionState.value
         if (current !is AutomationSessionState.Processing) return
         val targetProvider = provider ?: current.provider
-        val sanitized = ExternalAIErrorSanitizer.sanitize(rawError, targetProvider)
+        val sanitized = targetProvider.externalProvider?.let {
+            ExternalAIErrorSanitizer.sanitize(rawError, it)
+        } ?: (rawError ?: "알 수 없는 오류가 발생했어요.")
         _automationSessionState.value = AutomationSessionState.Failure(
             lastProvider = targetProvider,
             errorMessage = sanitized,
@@ -403,6 +444,7 @@ class ComposerViewModel : ViewModel() {
         }
         timerJob?.cancel()
         generationJob?.cancel()
+        val startTime = System.currentTimeMillis()
         update {
             it.copy(
                 isGenerating = true,
@@ -434,6 +476,11 @@ class ComposerViewModel : ViewModel() {
                     post = post,
                     signature = signature
                 )
+                val elapsedSeconds = (System.currentTimeMillis() - startTime) / 1000.0
+                if (::profileStore.isInitialized) {
+                    profileStore.runMetricsStore.recordRun(AIProviderIdentity.DEVICE, elapsedSeconds)
+                    profileStore.availabilityStore.recordUsed(AIProviderIdentity.DEVICE)
+                }
                 update {
                     it.copy(
                         idea = post.composedText,
@@ -474,6 +521,7 @@ class ComposerViewModel : ViewModel() {
         }
         timerJob?.cancel()
         generationJob?.cancel()
+        externalGenerationStartTime = System.currentTimeMillis()
         val imageCount = _state.value.mediaItems.count { it.kind == MediaKind.IMAGE }
         update { state ->
             state.copy(
@@ -668,6 +716,17 @@ class ComposerViewModel : ViewModel() {
             copyToClipboard(context, cleanedText)
         }
         timerJob?.cancel()
+        val elapsedSeconds = if (externalGenerationStartTime > 0L) {
+            (System.currentTimeMillis() - externalGenerationStartTime) / 1000.0
+        } else {
+            0.0
+        }
+        AIProviderIdentity.fromExternalProvider(provider)?.let { identity ->
+            if (::profileStore.isInitialized) {
+                profileStore.runMetricsStore.recordRun(identity, elapsedSeconds)
+                profileStore.availabilityStore.recordUsed(identity)
+            }
+        }
         val signature = currentDraftSignature()
         val lines = cleanedText.split("\n")
         val hashtags = (lines.firstOrNull() ?: "")

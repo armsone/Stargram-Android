@@ -52,7 +52,7 @@ class ExternalAIParityTest {
     @Test
     fun `AIChoice 순서와 AI 표기가 정확하다`() {
         val choices = AIChoice.all
-        assertEquals(4, choices.size)
+        assertEquals(5, choices.size)
         assertEquals("gemini", choices[0].id)
         assertEquals("Gemini", choices[0].title)
 
@@ -64,6 +64,9 @@ class ExternalAIParityTest {
 
         assertEquals("device-ai", choices[3].id)
         assertEquals("AI", choices[3].title)
+
+        assertEquals("random", choices[4].id)
+        assertEquals("Random", choices[4].title)
     }
 
     @Test
@@ -507,7 +510,7 @@ class ExternalAIParityTest {
     @Test
     fun `AIChoice 항목들은 직접 실행 대상과 1대1 매핑된다`() {
         val choices = AIChoice.all
-        assertEquals(4, choices.size)
+        assertEquals(5, choices.size)
 
         // Gemini
         val geminiChoice = choices[0] as AIChoice.External
@@ -524,6 +527,10 @@ class ExternalAIParityTest {
         // OnDevice
         val onDeviceChoice = choices[3]
         assertTrue(onDeviceChoice is AIChoice.OnDevice)
+
+        // Random
+        val randomChoice = choices[4]
+        assertTrue(randomChoice is AIChoice.Random)
     }
 
     @Test

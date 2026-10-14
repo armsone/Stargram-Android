@@ -46,6 +46,12 @@
                 <action android:name="com.armsone.starmanager.action.CAMERA_CAPTURE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="com.armsone.imanagerai.action.AUTOMATION" />
+                <action android:name="com.armsone.imanager.action.AUTOMATION" />
+                <action android:name="com.armsone.starmanager.action.AUTOMATION" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
             <!-- Deep-link support: imanagerai:// (primary), imanager:// (alias), and starmanager:// (legacy compatibility) -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

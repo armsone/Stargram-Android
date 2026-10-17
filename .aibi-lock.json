@@ -62,7 +62,7 @@
           "source": "profiles/imanager/distribution/android/ExternalAIModels.kt"
         },
         "app/src/main/java/com/armsone/imanagerai/ui/externalai/ExternalAIScripts.kt": {
-          "sha256": "28f2428672282f358690971417c94ed4630f0b13e43e3b50e023902f1b31b8b1",
+          "sha256": "9e36a000fd816c4591e212a7869c40e78680fae74565f2283181a242271d4bb1",
           "source": "profiles/imanager/distribution/android/ExternalAIScripts.kt"
         },
         "app/src/main/java/com/armsone/imanagerai/ui/externalai/ExternalAISecurityPolicy.kt": {

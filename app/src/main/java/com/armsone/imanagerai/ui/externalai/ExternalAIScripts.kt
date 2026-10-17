@@ -61,7 +61,7 @@ object ExternalAIScripts {
             var allowAncestorSearch=$allowAncestorSearch;
             ${editorVisibilityHelpers}
             var input=queryFirstEditor(${config.input});
-            var historySelector='model-response,message-content,user-query,[data-test-id="model-response"],[data-test-id="user-query"],[data-testid="transcript-row"],[data-testid*="conversation-turn"],[data-testid*="assistant"],[data-testid*="user-message"],.font-claude-message,.font-claude-response,.font-user-message,[data-message-author-role]';
+            var historySelector='model-response,message-content,user-query,[data-test-id="model-response"],[data-test-id="user-query"],[data-testid="transcript-row"],[data-testid*="conversation-turn"],[data-testid*="assistant"],[data-testid*="user-message"],.font-claude-message,.font-claude-response,.font-user-message,[data-message-author-role],[data-user-message-bubble],[data-conversation-role]';
             function isSafeComposerRoot(node) {
                 if(!node || node===document || node===document.body || node===document.documentElement || node.nodeType!==1) return false;
                 if(node.tagName==='BODY' || node.tagName==='HTML') return false;
@@ -168,7 +168,7 @@ object ExternalAIScripts {
                 }
                 // Extend preview scope to nearest connected ancestor for form-less Gemini/Claude.
                 if(!allowAncestorSearch || !input || input.closest('form')) return 0;
-                var historySelector='model-response,message-content,user-query,[data-test-id="model-response"],[data-test-id="user-query"],[data-testid="transcript-row"],[data-testid*="conversation-turn"],[data-testid*="assistant"],[data-testid*="user-message"],.font-claude-message,.font-claude-response,.font-user-message,[data-message-author-role]';
+                var historySelector='model-response,message-content,user-query,[data-test-id="model-response"],[data-test-id="user-query"],[data-testid="transcript-row"],[data-testid*="conversation-turn"],[data-testid*="assistant"],[data-testid*="user-message"],.font-claude-message,.font-claude-response,.font-user-message,[data-message-author-role],[data-user-message-bubble],[data-conversation-role]';
                 var sharedAncestor=null;
                 var curr=input.parentElement;
                 while(curr && curr!==document.body && curr!==document.documentElement && curr.nodeType===1) {
@@ -1792,6 +1792,7 @@ object ExternalAIScripts {
                 ),
                 assistant = toJsonArray(
                     listOf(
+                        "[data-markdown-text-style='assistant-message']",
                         "[data-message-author-role='assistant']",
                         "div.agent-turn",
                         "div[data-testid*='conversation-turn'] .markdown"

@@ -47,7 +47,7 @@
       }
     },
     "imanager-android": {
-      "version": "0.5.2",
+      "version": "0.5.4",
       "files": {
         "app/src/main/java/com/armsone/imanagerai/ui/externalai/ExternalAINativeFileBridge.kt": {
           "sha256": "727b03c6a6a6e3f4a932db739d8120f44c75dc872d03c38991a384ad8eb27c87",
@@ -86,16 +86,20 @@
           "source": "profiles/imanager/distribution/android/ExternalAITimerFormatter.kt"
         },
         "app/src/main/java/com/armsone/imanagerai/ui/externalai/ExternalAIAuthStatus.kt": {
-          "sha256": "4c90880810d3ca45671edfbf48a6cc6d858e051785c2084ae26082648d049158",
+          "sha256": "2a7d096d97fc84654c7ea3653d5d71c270673f9102efa6eb3ded4f8170904689",
           "source": "profiles/imanager/distribution/android/ExternalAIAuthStatus.kt"
         },
         "app/src/main/java/com/armsone/imanagerai/ui/externalai/ExternalAIDiagnosticsStore.kt": {
           "sha256": "9156e210cbee0e85f2fd0e9c68e120992da85ab38bda40d880b0585f509c7791",
           "source": "profiles/imanager/distribution/android/ExternalAIDiagnosticsStore.kt"
+        },
+        "app/src/main/java/com/armsone/imanagerai/ui/externalai/ExternalAISurface.kt": {
+          "sha256": "f9d4203b227ea4e3396f22f42ed5732f6b5ed2917e67dfd7ef1309c6d67e2ae8",
+          "source": "profiles/imanager/distribution/android/ExternalAISurface.kt"
         }
       }
     }
   },
   "consumer": "imanager",
-  "aibiVersion": "0.5.2"
+  "aibiVersion": "0.5.4"
 }

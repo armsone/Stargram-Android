@@ -235,6 +235,16 @@ object ExternalAIAuthStatus {
                     // Keep the bounded outer timeout authoritative instead of publishing UNKNOWN
                     // on the first transient navigation error.
                 }
+
+                // complete() already guarantees a single release via hasCompleted; a dead
+                // renderer is not logout evidence, so it only resolves as UNKNOWN.
+                override fun onRenderProcessGone(
+                    renderedView: WebView?,
+                    detail: android.webkit.RenderProcessGoneDetail?
+                ): Boolean {
+                    complete(ExternalAIAuthState.UNKNOWN)
+                    return true
+                }
             }
 
             webView.loadUrl(provider.url)

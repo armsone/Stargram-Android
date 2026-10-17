@@ -132,6 +132,7 @@ fun ExternalAISurface(
         diagnosticRun?.let { diagnostics.record(it, event, metrics) }
     }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var rendererDead by remember { mutableStateOf(false) }
     var popupWebViewRef by remember { mutableStateOf<WebView?>(null) }
     var activeFallbackReason by remember(fallbackReason) { mutableStateOf(fallbackReason) }
     var detectedFallbackReason by remember { mutableStateOf<ExternalAIFallbackReason?>(null) }
@@ -274,8 +275,8 @@ fun ExternalAISurface(
     }
 
     // LOGIN 모드: 내비게이션 완료 및 늦은 하이드레이션 중 긍정적 인증 상태를 감지하여 자동 닫기
-    LaunchedEffect(mode, navigationGeneration, isPageReady) {
-        if (!mode.isLogin || hasClosedOnAuth || !isPageReady) return@LaunchedEffect
+    LaunchedEffect(mode, navigationGeneration, isPageReady, taskCancelled) {
+        if (!mode.isLogin || hasClosedOnAuth || !isPageReady || taskCancelled) return@LaunchedEffect
         val wv = webViewRef ?: return@LaunchedEffect
 
         val currentUrl = wv.url
@@ -291,7 +292,7 @@ fun ExternalAISurface(
         }
 
         val startTime = System.currentTimeMillis()
-        while (isActive && !hasClosedOnAuth && System.currentTimeMillis() - startTime < 45_000L) {
+        while (isActive && !hasClosedOnAuth && !taskCancelled && webViewRef === wv && System.currentTimeMillis() - startTime < 45_000L) {
             val checkUrl = wv.url
             if (!ExternalAISecurityPolicy.canInjectScript(checkUrl, provider)) {
                 break
@@ -301,6 +302,8 @@ fun ExternalAISurface(
             val authRes = suspendCancellableCoroutine<String?> { cont ->
                 wv.evaluateJavascript(authScript) { if (cont.isActive) cont.resume(it) }
             }
+
+            if (taskCancelled || webViewRef !== wv) return@LaunchedEffect
 
             val check = ExternalAIScripts.parseAuthCheckResult(authRes)
             if (check.authenticated) {
@@ -321,7 +324,7 @@ fun ExternalAISurface(
     }
 
     // 메인 프레임 내비게이션 완료 시 자동 채우기 및 전송 루프 실행
-    LaunchedEffect(navigationGeneration, nativeAttachmentBatch.uris.size, nativeAttachmentPreparationFailed) {
+    LaunchedEffect(navigationGeneration, nativeAttachmentBatch.uris.size, nativeAttachmentPreparationFailed, taskCancelled) {
         if (mode.isLogin || taskCancelled || (prompt.isBlank() && attachments.isEmpty()) || hasSubmittedPrompt || hasImportedAnswer) return@LaunchedEffect
         if (nativeAttachmentPreparationFailed) {
             fillFailed = true
@@ -364,7 +367,7 @@ fun ExternalAISurface(
             record("attachment_ready", mapOf("attached_count" to attachments.size))
         }
 
-        while (isActive && !taskCancelled && System.currentTimeMillis() - startTime < 45_000L && !hasSubmittedPrompt && !hasImportedAnswer) {
+        while (isActive && !taskCancelled && webViewRef === wv && System.currentTimeMillis() - startTime < 45_000L && !hasSubmittedPrompt && !hasImportedAnswer) {
             if (isPageReady) {
                 if (!baselineCaptured) {
                     val baselineScript = ExternalAIScripts.recordBaselineScript(provider)
@@ -398,21 +401,23 @@ fun ExternalAISurface(
     }
 
     // 답변 관찰 루프
-    LaunchedEffect(hasSubmittedPrompt, navigationGeneration) {
-        if (mode.isLogin || !hasSubmittedPrompt || hasImportedAnswer) return@LaunchedEffect
+    LaunchedEffect(hasSubmittedPrompt, navigationGeneration, taskCancelled) {
+        if (mode.isLogin || !hasSubmittedPrompt || hasImportedAnswer || taskCancelled) return@LaunchedEffect
         val wv = webViewRef ?: return@LaunchedEffect
         if (!ExternalAISecurityPolicy.canInjectScript(wv.url, provider)) return@LaunchedEffect
         stabilityState = stabilityState.reset()
 
-        while (isActive && !hasImportedAnswer) {
+        while (isActive && !hasImportedAnswer && !taskCancelled && webViewRef === wv) {
             delay(700L)
 
-            if (taskCancelled) return@LaunchedEffect
+            if (taskCancelled || webViewRef !== wv) return@LaunchedEffect
             diagnosticRun?.let { wv.drainAIBIDiagnostics(provider, diagnostics, it) }
+            if (taskCancelled || webViewRef !== wv) return@LaunchedEffect
             val errorScript = ExternalAIScripts.extractErrorScript()
             val errorRes = suspendCancellableCoroutine<String?> { cont ->
                 wv.evaluateJavascript(errorScript) { if (cont.isActive) cont.resume(it) }
             }
+            if (taskCancelled || webViewRef !== wv) return@LaunchedEffect
             val domError = ExternalAIScripts.parseErrorResult(errorRes)
             if (domError.hasError && !domError.error.isNullOrBlank()) {
                 val sanitized = ExternalAIErrorSanitizer.sanitize(domError.error, provider)
@@ -429,6 +434,7 @@ fun ExternalAISurface(
             val answerRes = suspendCancellableCoroutine<String?> { cont ->
                 wv.evaluateJavascript(script) { if (cont.isActive) cont.resume(it) }
             }
+            if (taskCancelled || webViewRef !== wv) return@LaunchedEffect
             val poll = ExternalAIScripts.parsePollResult(answerRes)
             isGenerating = poll.generating
 
@@ -451,10 +457,10 @@ fun ExternalAISurface(
     }
 
     // 남은 시간 역카운터
-    LaunchedEffect(hasSubmittedPrompt, hasImportedAnswer) {
-        if (hasSubmittedPrompt && !hasImportedAnswer) {
+    LaunchedEffect(hasSubmittedPrompt, hasImportedAnswer, taskCancelled) {
+        if (hasSubmittedPrompt && !hasImportedAnswer && !taskCancelled) {
             elapsedSeconds = 0L
-            while (isActive && !hasImportedAnswer) {
+            while (isActive && !hasImportedAnswer && !taskCancelled) {
                 delay(1000L)
                 elapsedSeconds += 1L
                 if (elapsedSeconds >= ExternalAITimerFormatter.GENERATION_TIMEOUT_SECONDS) {
@@ -687,6 +693,7 @@ fun ExternalAISurface(
                     .weight(1f)
                     .background(Color.White)
             ) {
+                if (!rendererDead) {
                 AndroidView(
                     factory = { ctx ->
                         WebView.setWebContentsDebuggingEnabled(
@@ -788,6 +795,35 @@ fun ExternalAISurface(
                                         onError(sanitized)
                                     }
                                 }
+
+                                // Renderer death must be acknowledged with destroy(); leaving the
+                                // dead WebView attached/referenced after returning true is undefined
+                                // per the WebViewClient contract.
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: android.webkit.RenderProcessGoneDetail?
+                                ): Boolean {
+                                    val dead = view ?: return true
+                                    // A late callback from an already-replaced/cleared view must not
+                                    // clobber the state of a healthy current/replacement WebView.
+                                    if (webViewRef !== dead) {
+                                        (dead.parent as? ViewGroup)?.removeView(dead)
+                                        dead.stopLoading()
+                                        dead.destroy()
+                                        return true
+                                    }
+                                    taskCancelled = true
+                                    webViewRef = null
+                                    rendererDead = true
+                                    (dead.parent as? ViewGroup)?.removeView(dead)
+                                    dead.stopLoading()
+                                    dead.destroy()
+                                    val message = "표시 화면이 중단되어 작업을 멈췄어요. 다시 시도해 주세요."
+                                    detectedErrorMessage = message
+                                    isGenerating = false
+                                    onError(message)
+                                    return true
+                                }
                             }
 
                             webChromeClient = object : WebChromeClient() {
@@ -845,6 +881,17 @@ fun ExternalAISurface(
                                                 if (popupWebViewRef === popupView) popupWebViewRef = null
                                                 return true
                                             }
+
+                                            override fun onRenderProcessGone(
+                                                popupView: WebView?,
+                                                detail: android.webkit.RenderProcessGoneDetail?
+                                            ): Boolean {
+                                                val dead = popupView ?: return true
+                                                if (popupWebViewRef === dead) popupWebViewRef = null
+                                                dead.stopLoading()
+                                                dead.destroy()
+                                                return true
+                                            }
                                         }
                                     }
                                     popupWebViewRef = popup
@@ -862,6 +909,7 @@ fun ExternalAISurface(
                         .fillMaxSize()
                         .testTag("externalai.webview")
                 )
+                }
             }
         }
     }
